@@ -1,6 +1,7 @@
 package com.jpmc.midascore;
 
 import com.jpmc.midascore.foundation.Transaction;
+import com.jpmc.midascore.service.TransactionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -16,6 +17,13 @@ public class KafkaTransactionListener {
 
     // Thread-safe list for test verification (store amounts in arrival order)
     public static final List<Float> receivedAmounts = new CopyOnWriteArrayList<>();
+
+    private final TransactionService transactionService;
+
+    // Constructor injection - cleaner for testing and easier to reason about
+    public KafkaTransactionListener(TransactionService transactionService) {
+        this.transactionService = transactionService;
+    }
 
     // Accept Transaction directly — Spring Kafka will deserialize into this type
     @KafkaListener(topics = "${general.kafka-topic:midas-topic}")
@@ -35,6 +43,14 @@ public class KafkaTransactionListener {
                     tx.getRecipientId(),
                     amount
             );
+
+            // hand off to service which will validate and persist (or discard) the tx
+            boolean accepted = transactionService.validateAndRecord(tx);
+            if (!accepted) {
+                log.info("Transaction discarded by validation: {}", tx);
+            } else {
+                log.debug("Transaction accepted and recorded: {}", tx);
+            }
 
             // Safety: keep list bounded (not required for tests)
             if (receivedAmounts.size() > 1000) {
