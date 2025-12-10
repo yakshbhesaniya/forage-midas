@@ -1,6 +1,9 @@
 general:
   kafka-topic: midas-topic
 
+server:
+  port: 33400
+
 spring:
   kafka:
     consumer:
