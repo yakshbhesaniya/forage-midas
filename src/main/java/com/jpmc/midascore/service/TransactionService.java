@@ -2,74 +2,72 @@ package com.jpmc.midascore.service;
 
 import com.jpmc.midascore.entity.TransactionRecord;
 import com.jpmc.midascore.entity.UserRecord;
+import com.jpmc.midascore.foundation.Incentive;
 import com.jpmc.midascore.foundation.Transaction;
 import com.jpmc.midascore.repository.TransactionRecordRepository;
 import com.jpmc.midascore.repository.UserRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
 
 @Service
 public class TransactionService {
-    private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
 
     private final UserRepository userRepository;
-    private final TransactionRecordRepository txRepository;
+    private final TransactionRecordRepository txRecordRepository;
+    private final RestTemplate restTemplate;
 
-    public TransactionService(UserRepository userRepository, TransactionRecordRepository txRepository) {
+    // incentive API URL (as given)
+    private final String incentiveUrl = "http://localhost:8080/incentive";
+
+    public TransactionService(UserRepository userRepository,
+                              TransactionRecordRepository txRecordRepository,
+                              RestTemplate restTemplate) {
         this.userRepository = userRepository;
-        this.txRepository = txRepository;
+        this.txRecordRepository = txRecordRepository;
+        this.restTemplate = restTemplate;
     }
 
     @Transactional
     public boolean validateAndRecord(Transaction tx) {
-        if (tx == null) return false;
+        UserRecord sender = userRepository.findById(tx.getSenderId());
+        UserRecord recipient = userRepository.findById(tx.getRecipientId());
 
-        long senderId = tx.getSenderId();
-        long recipientId = tx.getRecipientId();
-        float amount = tx.getAmount();
-
-        if (amount <= 0f) {
-            log.info("Dropping transaction with non-positive amount: {}", amount);
-            return false;
-        }
-
-        // your UserRepository defines findById(long) that returns UserRecord (not Optional)
-        UserRecord sender = null;
-        UserRecord recipient = null;
-        try {
-            sender = userRepository.findById(senderId);
-        } catch (Exception ignored) {}
-
-        try {
-            recipient = userRepository.findById(recipientId);
-        } catch (Exception ignored) {}
-
+        // validation
         if (sender == null || recipient == null) {
-            log.info("Sender or recipient missing - sender: {}, recipient: {}", senderId, recipientId);
+            return false;
+        }
+        if (sender.getBalance() < tx.getAmount()) {
             return false;
         }
 
-        // validate sender balance
-        if (sender.getBalance() < amount) {
-            log.info("Insufficient funds for sender {}: balance={}, required={}", senderId, sender.getBalance(), amount);
-            return false;
-        }
-
-        // perform updates
-        sender.setBalance(sender.getBalance() - amount);
-        recipient.setBalance(recipient.getBalance() + amount);
-
-        // persist updated users (save will work with CrudRepository)
+        // deduct from sender
+        sender.setBalance(sender.getBalance() - tx.getAmount());
         userRepository.save(sender);
+
+        // call incentives API (may return Incentive with amount >= 0)
+        float incentiveAmount = 0f;
+        try {
+            Incentive incentive = restTemplate.postForObject(incentiveUrl, tx, Incentive.class);
+            if (incentive != null) {
+                incentiveAmount = incentive.getAmount();
+            }
+        } catch (Exception e) {
+            // If incentive service is down or fails, treat incentive as 0
+            // log and continue (do not fail the transaction)
+            // use System.err or proper logger (logger not included here to keep things simple)
+            System.err.println("Failed to call incentive API: " + e.getMessage());
+            incentiveAmount = 0f;
+        }
+
+        // add amount + incentive to recipient
+        recipient.setBalance(recipient.getBalance() + tx.getAmount() + incentiveAmount);
         userRepository.save(recipient);
 
-        // persist transaction record
-        TransactionRecord record = new TransactionRecord(sender, recipient, amount);
-        txRepository.save(record);
+        // save transaction record with incentive
+        TransactionRecord record = new TransactionRecord(sender, recipient, tx.getAmount(), incentiveAmount);
+        txRecordRepository.save(record);
 
-        log.debug("Recorded transaction: {} -> {} amount {}", senderId, recipientId, amount);
         return true;
     }
 }
